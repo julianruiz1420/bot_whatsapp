@@ -1,6 +1,7 @@
 import os
 import json
 import psycopg2 
+import traceback # Importar traceback para errores detallados
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -22,6 +23,7 @@ def guardar_mensaje_en_db(telefono, mensaje, tipo='text'):
         cur = conn.cursor()
 
         # Comando SQL para insertar el mensaje
+        # ¡IMPORTANTE! Aseguramos que el nombre de la tabla sea el correcto: mensajes_whatsapp
         insert_query = """
         INSERT INTO mensajes_whatsapp (telefono_origen, mensaje_texto, tipo_mensaje)
         VALUES (%s, %s, %s);
@@ -33,7 +35,11 @@ def guardar_mensaje_en_db(telefono, mensaje, tipo='text'):
         print(f"Mensaje de {telefono} guardado con éxito.")
 
     except Exception as e:
-        print(f"Error al guardar en la base de datos: {e}")
+        # ¡ESTA ES LA MODIFICACIÓN CLAVE! Imprimir el error detallado de la conexión/DB
+        print("-------------------- ERROR DE BD DETALLADO --------------------")
+        print(f"Error al intentar guardar en Supabase: {e}")
+        traceback.print_exc() # Esto imprimirá todos los detalles del fallo de conexión
+        print("-------------------------------------------------------------")
     finally:
         if cur:
             cur.close()
@@ -41,7 +47,7 @@ def guardar_mensaje_en_db(telefono, mensaje, tipo='text'):
             conn.close()
 
 # --------------------------------------------------------------------------
-# 1. MÉTODO GET (VERIFICACIÓN DEL WEBHOOK DE META) - ¡ESTO FALTABA!
+# 1. MÉTODO GET (VERIFICACIÓN DEL WEBHOOK DE META)
 # --------------------------------------------------------------------------
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -73,7 +79,9 @@ def verify():
 @app.route("/webhook", methods=["POST"])
 def webhook_post():
     data = request.get_json()
-    print(f"Datos recibidos del Webhook: {data}") # Para depuración
+    
+    # 1. Imprimir los datos recibidos (para confirmar que Meta llegó)
+    print(f"Datos recibidos del Webhook: {data}") 
 
     try:
         # Verifica si hay mensajes en la estructura JSON

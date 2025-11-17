@@ -1,7 +1,7 @@
 import os
 import json
 import psycopg2 
-# ... tus otras importaciones ...
+from flask import Flask, request
 
 app = Flask(__name__)
 

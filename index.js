@@ -1,3 +1,5 @@
+require('dotenv').config(); 
+
 const { Client, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const mongoose = require('mongoose');
@@ -77,7 +79,7 @@ mongoose.connect(MONGO_URI)
             }),
             puppeteer: {
                 headless: true,
-                // Estos argumentos son CRÍTICOS para Heroku/Railway para ahorrar RAM
+                // Estos argumentos son CRÍTICOS para Railway para ahorrar RAM y Puppeteer
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -119,6 +121,9 @@ mongoose.connect(MONGO_URI)
         });
 
         client.on('message', async (msg) => {
+            // AÑADIDO: FILTRO PARA IGNORAR MENSAJES DE CONTROL/BROADCAST
+            if (msg.from.includes('broadcast')) return; 
+
             // Filtrar grupos (como antes)
             if (msg.from.includes('@g.us')) return;
 
@@ -151,7 +156,7 @@ mongoose.connect(MONGO_URI)
                         textoSalida = respuestaDelBot;
                         
                     } else if (msg.body.toLowerCase().includes('foto') || msg.body.toLowerCase().includes('imagen')) {
-                        // 💡 EJEMPLO DE RESPUESTA CON MEDIA
+                        // 💡 EJEMPLO DE RESPUESTA CON MEDIA (requiere archivo local en /assets/foto_respuesta.jpg)
                         // const media = MessageMedia.fromFilePath('./assets/foto_respuesta.jpg');
                         // await client.sendMessage(msg.from, media);
                         

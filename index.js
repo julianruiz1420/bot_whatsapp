@@ -8,7 +8,6 @@ const { createClient } = require('@supabase/supabase-js');
 
 // --- ⚠️ CONFIGURACIÓN CRÍTICA: USANDO VARIABLES DE ENTORNO ⚠️ ---
 // ESTOS VALORES DEBEN ESTAR CONFIGURADOS EN EL DASHBOARD DE RAILWAY
-// NO SE DEBE HARDCODEAR INFORMACIÓN SENSIBLE EN EL CÓDIGO.
 
 // 1. CREDENCIALES DE SUPABASE
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -50,7 +49,6 @@ async function verificarConexionSupabase() {
         }
     } catch (err) {
         console.error("Error crítico en Supabase:", err);
-        // No salimos aquí, ya que el fallo puede ser temporal, pero avisamos.
     }
 }
 verificarConexionSupabase();
@@ -97,13 +95,10 @@ mongoose.connect(MONGO_URI)
         // Función para obtener el texto o el tipo de mensaje para guardar
         const getMensajeTexto = (msg) => {
             if (msg.body && msg.body.length > 0) {
-                // Si tiene cuerpo, es texto (o texto con media adjunta)
                 return msg.body;
             }
-            // Ignoramos mensajes de control o vacíos
             if (msg.type === 'chat') return null; 
             
-            // Para multimedia (image, video, document, etc.)
             return `[${msg.type.toUpperCase()} COMPARTIDO]`;
         };
 
@@ -121,63 +116,55 @@ mongoose.connect(MONGO_URI)
         });
 
         client.on('message', async (msg) => {
-            // AÑADIDO: FILTRO PARA IGNORAR MENSAJES DE CONTROL/BROADCAST
-            if (msg.from.includes('broadcast')) return; 
-
-            // Filtrar grupos (como antes)
-            if (msg.from.includes('@g.us')) return;
+            // 1. FILTROS DE CONTROL
+            if (msg.from.includes('broadcast')) return; // Ignorar mensajes de control de WhatsApp
+            if (msg.from.includes('@g.us')) return;      // Ignorar grupos
 
             const mensajeGuardar = getMensajeTexto(msg);
             
-            // Ignorar mensajes de control y vacíos
+            // Ignorar mensajes vacíos (solo stickers sin texto, etc.)
             if (!mensajeGuardar) return; 
 
             const telefonoCliente = msg.from.replace('@c.us', '');
 
-            if(supabase) {
-                try {
-                    // --- 1. REGISTRO DEL MENSAJE DE ENTRADA (INCOMING) ---
-                    const { error: errorEntrada } = await supabase.from('mensajes_whatsapp').insert([{ 
-                        telefono_origen: telefonoCliente, 
-                        mensaje_texto: mensajeGuardar, 
-                        created_at: new Date().toISOString(),
-                        direccion: 'entrada' 
-                    }]);
-                    if (errorEntrada) console.error("❌ Error guardando entrada en Supabase:", errorEntrada.message);
+            // INICIO DE LA LÓGICA DE SUPABASE (SIN IF externo)
+            try {
+                let textoSalida = null;
+                
+                // --- A. REGISTRO DEL MENSAJE DE ENTRADA (INCOMING) ---
+                const { error: errorEntrada } = await supabase.from('mensajes_whatsapp').insert([{ 
+                    telefono_origen: telefonoCliente, 
+                    mensaje_texto: mensajeGuardar, 
+                    direccion: 'entrada' 
+                    // NO INCLUIR created_at, se genera por defecto en la BD
+                }]);
+                if (errorEntrada) console.error("❌ Error guardando entrada en Supabase:", errorEntrada.message);
 
+                
+                // --- B. LÓGICA DE RESPUESTA DEL BOT ---
+                if (msg.body.toLowerCase().includes('hola')) {
+                    const respuestaDelBot = '¡Hola! Soy tu asistente virtual. ¿En qué te puedo servir hoy?';
+                    await msg.reply(respuestaDelBot);
+                    textoSalida = respuestaDelBot;
                     
-                    // --- 2. LÓGICA DE RESPUESTA DEL BOT (TEXTO Y MULTIMEDIA) ---
-                    let respuestaDelBot = null;
-                    let textoSalida = null;
-                    
-                    if (msg.body.toLowerCase().includes('hola')) {
-                        respuestaDelBot = '¡Hola! Soy tu asistente virtual. ¿En qué te puedo servir hoy?';
-                        await msg.reply(respuestaDelBot);
-                        textoSalida = respuestaDelBot;
-                        
-                    } else if (msg.body.toLowerCase().includes('foto') || msg.body.toLowerCase().includes('imagen')) {
-                        // 💡 EJEMPLO DE RESPUESTA CON MEDIA (requiere archivo local en /assets/foto_respuesta.jpg)
-                        // const media = MessageMedia.fromFilePath('./assets/foto_respuesta.jpg');
-                        // await client.sendMessage(msg.from, media);
-                        
-                        await msg.reply("Simulación: Imagen de nuestro catálogo enviada.");
-                        textoSalida = '[IMAGEN DE SALIDA ENVIADA]';
-                    }
-                    
-                    // --- 3. REGISTRO DEL MENSAJE DE SALIDA (OUTGOING) ---
-                    if (textoSalida) {
-                        const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
-                            telefono_origen: telefonoCliente, 
-                            mensaje_texto: textoSalida, 
-                            created_at: new Date().toISOString(),
-                            direccion: 'salida' 
-                        }]);
-                        if (errorSalida) console.error("❌ Error guardando salida en Supabase:", errorSalida.message);
-                    }
-
-                } catch (error) {
-                    console.error("❌ Error fatal Supabase:", error);
+                } else if (msg.body.toLowerCase().includes('foto') || msg.body.toLowerCase().includes('imagen')) {
+                    await msg.reply("Simulación: Imagen de nuestro catálogo enviada.");
+                    textoSalida = '[IMAGEN DE SALIDA ENVIADA]';
                 }
+                
+                // --- C. REGISTRO DEL MENSAJE DE SALIDA (OUTGOING) ---
+                if (textoSalida) {
+                    const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
+                        telefono_origen: telefonoCliente, 
+                        mensaje_texto: textoSalida, 
+                        direccion: 'salida' 
+                        // NO INCLUIR created_at, se genera por defecto en la BD
+                    }]);
+                    if (errorSalida) console.error("❌ Error guardando salida en Supabase:", errorSalida.message);
+                }
+
+            } catch (error) {
+                console.error("❌ Error fatal Supabase:", error);
             }
         });
 

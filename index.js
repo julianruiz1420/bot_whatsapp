@@ -19,7 +19,6 @@ const MONGO_URI = 'mongodb+srv://bot:gestion123456@cluster1.xx5zpla.mongodb.net/
 console.log('🔍 Validando credenciales de Supabase...');
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Esta función prueba la conexión inmediatamente
 async function verificarConexionSupabase() {
     try {
         const { data, error } = await supabase.from('mensajes_whatsapp').select('*').limit(1);
@@ -44,7 +43,7 @@ verificarConexionSupabase();
 
 
 // =========================================================
-// === 2. CONEXIÓN A MONGODB Y ARRANQUE (CON SALIDA AUTOMÁTICA SI FALLA) ===
+// === 2. CONEXIÓN A MONGODB Y ARRANQUE ===
 // =========================================================
 console.log('⏳ Iniciando conexión a MongoDB...');
 
@@ -73,7 +72,7 @@ mongoose.connect(MONGO_URI)
                     '--disable-gpu',
                     '--no-zygote',
                     '--no-first-run',
-                    '--single-process', // ARGS DE OPTIMIZACIÓN CRUCIALES
+                    '--single-process',
                     '--disable-dev-shm-usage',
                     '--lang=en-US'
                 ]
@@ -96,14 +95,42 @@ mongoose.connect(MONGO_URI)
         client.on('message', async (msg) => {
             if (msg.from.includes('@g.us')) return;
 
+            const telefonoCliente = msg.from.replace('@c.us', '');
+
             if(supabase) {
                 try {
-                    const { error } = await supabase.from('mensajes_whatsapp').insert([{ 
-                        telefono_origen: msg.from.replace('@c.us', ''), 
+                    // --- 1. REGISTRO DEL MENSAJE DE ENTRADA (INCOMING) ---
+                    const { error: errorEntrada } = await supabase.from('mensajes_whatsapp').insert([{ 
+                        telefono_origen: telefonoCliente, 
                         mensaje_texto: msg.body,                         
-                        created_at: new Date().toISOString()            
+                        created_at: new Date().toISOString(),
+                        direccion: 'entrada' // 💡 NUEVO CAMPO
                     }]);
-                    if (error) console.error("❌ Error guardando en Supabase:", error.message);
+                    if (errorEntrada) console.error("❌ Error guardando entrada en Supabase:", errorEntrada.message);
+
+                    
+                    // --- 2. LÓGICA DE RESPUESTA DEL BOT (SI RESPONDE) ---
+                    let respuestaDelBot = null;
+                    
+                    if (msg.body.toLowerCase().includes('hola')) {
+                        respuestaDelBot = '¡Hola! Soy tu asistente virtual. ¿En qué te puedo servir hoy?';
+                        await msg.reply(respuestaDelBot);
+                    } else {
+                        // Si tienes otra lógica de respuesta, ponla aquí.
+                        // Solo respondemos si hay un 'hola' para el ejemplo.
+                    }
+
+                    // --- 3. REGISTRO DEL MENSAJE DE SALIDA (OUTGOING) ---
+                    if (respuestaDelBot) {
+                        const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
+                            telefono_origen: telefonoCliente,  // El cliente sigue siendo la referencia
+                            mensaje_texto: respuestaDelBot,                         
+                            created_at: new Date().toISOString(),
+                            direccion: 'salida' // 💡 NUEVO CAMPO
+                        }]);
+                        if (errorSalida) console.error("❌ Error guardando salida en Supabase:", errorSalida.message);
+                    }
+
                 } catch (error) {
                     console.error("❌ Error fatal Supabase:", error);
                 }
@@ -115,16 +142,7 @@ mongoose.connect(MONGO_URI)
 
     })
     .catch(err => {
-        // === AQUÍ ESTÁ EL CAMBIO PARA DETENER LA EJECUCIÓN ===
         console.error('\n❌ ERROR CRÍTICO DE CONEXIÓN A MONGO ❌');
         console.error(`Razón: ${err.message}`);
-        
-        if (err.message.includes('bad auth')) {
-            console.error('👉 Solución: Contraseña o usuario incorrectos en MongoDB.');
-        } else if (err.message.includes('SSL')) {
-            console.error('👉 Solución: La dirección del Cluster es incorrecta (copia mal la URL).');
-        }
-
-        console.error('\n🛑 DETENIENDO EJECUCIÓN DEL PROGRAMA...');
-        process.exit(1); // <--- ESTO CIERRA LA APLICACIÓN INMEDIATAMENTE
+        process.exit(1);
     });

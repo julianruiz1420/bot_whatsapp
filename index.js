@@ -1,4 +1,4 @@
-const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const mongoose = require('mongoose');
 const qrcode = require('qrcode-terminal');
@@ -78,6 +78,20 @@ mongoose.connect(MONGO_URI)
                 ]
             }
         });
+        
+        // Función para obtener el texto o el tipo de mensaje para guardar
+        const getMensajeTexto = (msg) => {
+            if (msg.body && msg.body.length > 0) {
+                // Si tiene cuerpo, es texto (o texto con media adjunta)
+                return msg.body;
+            }
+            // Si el cuerpo está vacío, es multimedia o un mensaje de control.
+            // Usamos un filtro simple: si el tipo es 'chat', no tiene cuerpo, lo ignoramos.
+            if (msg.type === 'chat') return null; 
+            
+            // Para multimedia (image, video, document, etc.)
+            return `[${msg.type.toUpperCase()} COMPARTIDO]`;
+        };
 
         client.on('qr', (qr) => {
             console.log('📱 ESCANEA ESTE QR:');
@@ -93,43 +107,56 @@ mongoose.connect(MONGO_URI)
         });
 
         client.on('message', async (msg) => {
+            // Filtrar grupos (como antes)
             if (msg.from.includes('@g.us')) return;
 
-            const telefonoCliente = msg.from.replace('@c.us', '');
+            const mensajeGuardar = getMensajeTexto(msg);
+            
+            // Ignorar mensajes de control y vacíos (si getMensajeTexto retorna null)
+            if (!mensajeGuardar) return; 
+
+            const telefonoCliente = msg.from.replace('@c.us', '');
 
             if(supabase) {
                 try {
-                    // --- 1. REGISTRO DEL MENSAJE DE ENTRADA (INCOMING) ---
+                    // --- 1. REGISTRO DEL MENSAJE DE ENTRADA (INCOMING) ---
                     const { error: errorEntrada } = await supabase.from('mensajes_whatsapp').insert([{ 
                         telefono_origen: telefonoCliente, 
-                        mensaje_texto: msg.body,                         
+                        mensaje_texto: mensajeGuardar,  // Usa el contenido que puede ser texto o [IMAGEN]
                         created_at: new Date().toISOString(),
-                        direccion: 'entrada' // 💡 NUEVO CAMPO
+                        direccion: 'entrada' 
                     }]);
                     if (errorEntrada) console.error("❌ Error guardando entrada en Supabase:", errorEntrada.message);
 
-                    
-                    // --- 2. LÓGICA DE RESPUESTA DEL BOT (SI RESPONDE) ---
-                    let respuestaDelBot = null;
-                    
-                    if (msg.body.toLowerCase().includes('hola')) {
-                        respuestaDelBot = '¡Hola! Soy tu asistente virtual. ¿En qué te puedo servir hoy?';
-                        await msg.reply(respuestaDelBot);
-                    } else {
-                        // Si tienes otra lógica de respuesta, ponla aquí.
-                        // Solo respondemos si hay un 'hola' para el ejemplo.
+                    
+                    // --- 2. LÓGICA DE RESPUESTA DEL BOT (TEXTO Y MULTIMEDIA) ---
+                    let respuestaDelBot = null;
+                    let textoSalida = null;
+                    
+                    if (msg.body.toLowerCase().includes('hola')) {
+                        respuestaDelBot = '¡Hola! Soy tu asistente virtual. ¿En qué te puedo servir hoy?';
+                        await msg.reply(respuestaDelBot);
+                        textoSalida = respuestaDelBot;
+                        
+                    } else if (msg.body.toLowerCase().includes('foto') || msg.body.toLowerCase().includes('imagen')) {
+                        // 💡 EJEMPLO DE RESPUESTA CON MEDIA (requiere MessageMedia y una ruta de archivo real)
+                        // const media = MessageMedia.fromFilePath('./assets/foto_respuesta.jpg');
+                        // await client.sendMessage(msg.from, media);
+                        
+                        await msg.reply("Simulación: Imagen de nuestro catálogo enviada.");
+                        textoSalida = '[IMAGEN DE SALIDA ENVIADA]';
                     }
-
+                    
                     // --- 3. REGISTRO DEL MENSAJE DE SALIDA (OUTGOING) ---
-                    if (respuestaDelBot) {
-                        const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
-                            telefono_origen: telefonoCliente,  // El cliente sigue siendo la referencia
-                            mensaje_texto: respuestaDelBot,                         
-                            created_at: new Date().toISOString(),
-                            direccion: 'salida' // 💡 NUEVO CAMPO
-                        }]);
-                        if (errorSalida) console.error("❌ Error guardando salida en Supabase:", errorSalida.message);
-                    }
+                    if (textoSalida) {
+                        const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
+                            telefono_origen: telefonoCliente, 
+                            mensaje_texto: textoSalida,                         
+                            created_at: new Date().toISOString(),
+                            direccion: 'salida' 
+                        }]);
+                        if (errorSalida) console.error("❌ Error guardando salida en Supabase:", errorSalida.message);
+                    }
 
                 } catch (error) {
                     console.error("❌ Error fatal Supabase:", error);

@@ -5,13 +5,16 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 
+// 1. CONFIGURACIÓN DE SERVICIOS
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('Bot CRM - Estabilizado'));
+// Health Check para Railway
+app.get('/', (req, res) => res.send('Bot CRM - Optimización y Clasificación Activa'));
 app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo.`));
 
+// 2. INICIALIZACIÓN DEL CLIENTE
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
@@ -27,17 +30,27 @@ const client = new Client({
     }
 });
 
+// 3. GESTIÓN DE QR
 client.on('qr', async (qr) => {
-    const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
-    const fileName = `temp-qr/session-${Date.now()}.png`;
-    await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { contentType: 'image/png', upsert: true });
-    const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
-    console.log(`➡️ QR: ${data.publicUrl}`);
+    try {
+        const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
+        const fileName = `temp-qr/session-${Date.now()}.png`;
+        await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { contentType: 'image/png', upsert: true });
+        const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
+        console.log(`➡️ QR LINK: ${data.publicUrl}`);
+    } catch (e) {
+        console.error('❌ Error QR:', e.message);
+    }
 });
 
 client.on('ready', () => console.log('✅ BOT CONECTADO.'));
 
+// --- 4. CONFIGURACIÓN DE OPTIMIZACIÓN (FILTRO DE CHATS) ---
+// Solo se guardará el historial de mensajes para estas categorías:
+const CLASIFICACIONES_PERMITIDAS = ['!cliente nuevo', '!cliente recurrente'];
+
 client.on('message_create', async (msg) => {
+    // Ignorar grupos y difusiones para no saturar la base de datos
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
@@ -46,51 +59,63 @@ client.on('message_create', async (msg) => {
     const mensajeTexto = msg.body ? msg.body.trim() : '';
 
     try {
-        // --- CAPTURA DE NOMBRE DE ALTA DISPONIBILIDAD ---
-        // Prioridad 1: Nombre de perfil que viene en el mensaje (NotifyName)
-        // Prioridad 2: Si el objeto 'vcard' existe, usarlo.
+        // --- A. OBTENER NOMBRE (PRIORIDAD AGENDA -> PERFIL) ---
         let nombreDetectado = msg._data.notifyName || 'Contacto Nuevo';
-
-        // Intentar obtener el nombre del chat de forma asíncrona pero protegida
         try {
             const chat = await msg.getChat();
             if (chat.name && chat.name !== telefono) {
-                nombreDetectado = chat.name; // Aquí es donde debería tomar el nombre de tu agenda
+                nombreDetectado = chat.name;
             }
         } catch (e) {
-            // Si falla, no hacemos nada y nos quedamos con el NotifyName para no trabar el bot
+            // Si getChat falla por el error de evaluación, mantenemos el nombre de perfil
         }
 
-        // 1. COMANDOS DE CLASIFICACIÓN
+        // --- B. VERIFICAR CLASIFICACIÓN EXISTENTE ---
+        let { data: contacto } = await supabase
+            .from('contactos')
+            .select('nombre, clasificacion')
+            .eq('telefono', telefono)
+            .single();
+
+        let clasificacionActual = contacto ? contacto.clasificacion : '!cliente nuevo';
+
+        // --- C. COMANDOS DE CLASIFICACIÓN (TODOS DISPONIBLES) ---
         const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo', '!grupo de gestion', '!operador'];
+        
         if (esSalida && comandos.includes(mensajeTexto.toLowerCase())) {
+            const nuevaClasificacion = mensajeTexto.toLowerCase();
             await supabase.from('contactos').upsert({ 
-                telefono: telefono, 
-                clasificacion: mensajeTexto.toLowerCase(),
+                telefono, 
+                clasificacion: nuevaClasificacion, 
                 nombre: nombreDetectado 
             }, { onConflict: 'telefono' });
-            console.log(`⭐ Clasificado: ${nombreDetectado} como ${mensajeTexto}`);
-            return;
+            
+            console.log(`⭐ Clasificación actualizada: ${nombreDetectado} -> ${nuevaClasificacion}`);
+            return; // No guardamos el comando en el historial
         }
 
-        // 2. AUTO-REGISTRO (Solo si no existe en la tabla)
-        const { data: existe } = await supabase.from('contactos').select('telefono').eq('telefono', telefono).single();
-
-        if (!existe) {
+        // --- D. AUTO-REGISTRO DE NUEVOS CONTACTOS ---
+        if (!contacto) {
             await supabase.from('contactos').insert([{ 
-                telefono: telefono, 
+                telefono, 
                 nombre: nombreDetectado, 
                 clasificacion: '!cliente nuevo' 
             }]);
-            console.log(`🆕 Auto-registro exitoso: ${nombreDetectado}`);
+            console.log(`🆕 Auto-registro: ${nombreDetectado}`);
         }
 
-        // 3. HISTORIAL DE MENSAJES (Siempre se ejecuta)
-        await supabase.from('mensajes_whatsapp').insert([{ 
-            telefono_origen: telefono, 
-            mensaje_texto: mensajeTexto, 
-            direccion: esSalida ? 'salida' : 'entrada' 
-        }]);
+        // --- E. CONTROL DE ALMACENAMIENTO (RESTRICCIÓN CRM) ---
+        // Solo guardamos si es cliente. Proveedores, Operadores y Grupos de Gestión no ocupan espacio.
+        if (CLASIFICACIONES_PERMITIDAS.includes(clasificacionActual)) {
+            await supabase.from('mensajes_whatsapp').insert([{ 
+                telefono_origen: telefono, 
+                mensaje_texto: mensajeTexto, 
+                direccion: esSalida ? 'salida' : 'entrada' 
+            }]);
+        } else {
+            // Opcional: Log para confirmar que el ahorro de espacio funciona
+            // console.log(`🧹 Mensaje omitido para: ${clasificacionActual}`);
+        }
 
     } catch (error) {
         console.error("❌ Error en flujo:", error.message);

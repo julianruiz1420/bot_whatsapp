@@ -9,14 +9,15 @@ const app = express();
 const port = process.env.PORT || 3000;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-app.get('/', (req, res) => res.send('Bot Activo'));
-app.listen(port, '0.0.0.0', () => console.log(`🚀 Puerto ${port} abierto`));
+// 1. Health Check (Mantiene vivo el proceso en Railway)
+app.get('/', (req, res) => res.send('Bot Online'));
+app.listen(port, '0.0.0.0');
 
-// CONFIGURACIÓN PARA USAR EL VOLUMEN
+// 2. Configuración del Cliente (Usa el Volumen montado)
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
-        dataPath: path.join(__dirname, '.wwebjs_auth') // Carpeta en el Volumen
+        dataPath: path.join(__dirname, '.wwebjs_auth') // Ruta al Volume
     }),
     puppeteer: {
         headless: true,
@@ -24,29 +25,34 @@ const client = new Client({
     }
 });
 
-// GENERADOR DE LINK (Sin condiciones, siempre se ejecuta)
+// 3. Generación de Link QR (Simplificado)
 client.on('qr', async (qr) => {
-    console.log('📱 QR RECIBIDO. SUBIENDO A SUPABASE...');
     try {
         const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
         const fileName = `temp-qr/${Date.now()}.png`;
         
         await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, {
-            contentType: 'image/png', 
-            upsert: true
+            contentType: 'image/png', upsert: true
         });
 
         const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
         
-        console.log('\n**************************************');
+        console.log('--------------------------------------');
         console.log(`➡️ ESCANEA AQUÍ: ${data.publicUrl}`);
-        console.log('**************************************\n');
+        console.log('--------------------------------------');
     } catch (e) {
         console.error('❌ Error Supabase:', e.message);
     }
 });
 
-client.on('ready', () => console.log('✅ CONECTADO Y GUARDADO EN VOLUMEN'));
+// 4. Eventos de Conexión
+client.on('ready', () => console.log('✅ BOT CONECTADO EN VOLUMEN'));
 
-console.log('⏳ Iniciando Cliente...');
+client.on('message', async (msg) => {
+    if (msg.body.toLowerCase() === 'hola') {
+        await msg.reply('¡Hola! Bot simplificado activo.');
+    }
+});
+
+console.log('🚀 Iniciando...');
 client.initialize();

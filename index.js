@@ -17,13 +17,32 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 2. HEALTH CHECK (Mantiene el bot vivo en Railway)
+// 2. SERVIDOR EXPRESS Y RUTAS DE CONTROL
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.status(200).send('Bot Online - Capturando Entradas y Salidas'));
-app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo`));
 
-// 3. INICIALIZACIÓN CON LOCALAUTH (Usa tu Volumen de 5GB)
+app.get('/', (req, res) => {
+    res.status(200).send('<h1>Bot de WhatsApp Activo</h1><p>Escuchando entradas y salidas.</p>');
+});
+
+// RUTA PARA CAMBIAR DE CUENTA (Borra la sesión actual)
+app.get('/logout', async (req, res) => {
+    try {
+        console.log('🔄 Solicitud de cierre de sesión recibida...');
+        await client.logout(); // Cierra la sesión en WhatsApp y limpia LocalAuth
+        res.send('<h1>Sesión Cerrada</h1><p>El bot se está reiniciando. Revisa los logs de Railway para el nuevo QR.</p>');
+        console.log('✅ Sesión cerrada correctamente. Reiniciando para generar nuevo QR...');
+        // El bot suele requerir un reinicio tras el logout para regenerar el QR limpiamente
+        process.exit(0); 
+    } catch (error) {
+        console.error('❌ Error al cerrar sesión:', error.message);
+        res.status(500).send('Error al cerrar sesión: ' + error.message);
+    }
+});
+
+app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo. Acceso a /logout disponible.`));
+
+// 3. INICIALIZACIÓN CON LOCALAUTH (Persistencia en Volumen de 5GB)
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
@@ -49,7 +68,7 @@ client.on('qr', async (qr) => {
         });
         const { data } = supabase.storage.from(SUPABASE_BUCKET_NAME).getPublicUrl(fileName);
         console.log('\n----------------------------------------------------');
-        console.log(`➡️ ESCANEA AQUÍ: ${data.publicUrl}`);
+        console.log(`➡️ ESCANEA AQUÍ PARA NUEVA CUENTA: ${data.publicUrl}`);
         console.log('----------------------------------------------------\n');
     } catch (e) {
         console.error('❌ Error QR:', e.message);
@@ -60,20 +79,15 @@ client.on('ready', () => console.log('✅ BOT CONECTADO. Sesión protegida en el
 
 // 5. LÓGICA DE MENSAJES: CAPTURA ENTRADAS Y SALIDAS
 client.on('message_create', async (msg) => {
-    // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
-    // Detectar si el mensaje lo envié yo (desde el celular o el bot) o el cliente
     const esSalida = msg.fromMe; 
     const direccion = esSalida ? 'salida' : 'entrada';
-    
-    // Si es salida, el 'to' es el cliente. Si es entrada, el 'from' es el cliente.
     const chatId = esSalida ? msg.to : msg.from;
     const telefonoCliente = chatId.replace('@c.us', '');
     const mensajeTexto = msg.body || `[Mensaje tipo: ${msg.type}]`;
 
     try {
-        // Guardar en la tabla mensajes_whatsapp
         const { error } = await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefonoCliente, 
             mensaje_texto: mensajeTexto, 
@@ -86,11 +100,9 @@ client.on('message_create', async (msg) => {
             console.log(`✅ Registro guardado: ${direccion} (${telefonoCliente})`);
         }
 
-        // Respuesta automática (Solo si es entrada y contiene 'hola')
         if (!esSalida && msg.body.toLowerCase().includes('hola')) {
             await msg.reply('¡Hola! Soy tu asistente virtual. He guardado tu mensaje.');
         }
-
     } catch (error) {
         console.error("❌ Error fatal:", error.message);
     }

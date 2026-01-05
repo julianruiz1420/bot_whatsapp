@@ -9,7 +9,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('Bot CRM - Restaurado y Funcionando'));
+app.get('/', (req, res) => res.send('Bot CRM - Estabilizado'));
 app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo.`));
 
 const client = new Client({
@@ -32,12 +32,11 @@ client.on('qr', async (qr) => {
     const fileName = `temp-qr/session-${Date.now()}.png`;
     await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { contentType: 'image/png', upsert: true });
     const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
-    console.log(`➡️ NUEVO QR: ${data.publicUrl}`);
+    console.log(`➡️ QR: ${data.publicUrl}`);
 });
 
-client.on('ready', () => console.log('✅ BOT CONECTADO Y REGISTRANDO.'));
+client.on('ready', () => console.log('✅ BOT CONECTADO.'));
 
-// LÓGICA ULTRA-ESTABLE (Sin funciones que bloqueen)
 client.on('message_create', async (msg) => {
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
@@ -47,9 +46,20 @@ client.on('message_create', async (msg) => {
     const mensajeTexto = msg.body ? msg.body.trim() : '';
 
     try {
-        // --- OBTENCIÓN DE NOMBRE SEGURA (Sin getContact que falla) ---
-        // Usamos el nombre que viene en la metadata del mensaje (notifyName)
-        const nombreMetadata = msg._data.notifyName || 'Contacto Nuevo';
+        // --- CAPTURA DE NOMBRE DE ALTA DISPONIBILIDAD ---
+        // Prioridad 1: Nombre de perfil que viene en el mensaje (NotifyName)
+        // Prioridad 2: Si el objeto 'vcard' existe, usarlo.
+        let nombreDetectado = msg._data.notifyName || 'Contacto Nuevo';
+
+        // Intentar obtener el nombre del chat de forma asíncrona pero protegida
+        try {
+            const chat = await msg.getChat();
+            if (chat.name && chat.name !== telefono) {
+                nombreDetectado = chat.name; // Aquí es donde debería tomar el nombre de tu agenda
+            }
+        } catch (e) {
+            // Si falla, no hacemos nada y nos quedamos con el NotifyName para no trabar el bot
+        }
 
         // 1. COMANDOS DE CLASIFICACIÓN
         const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
@@ -57,24 +67,25 @@ client.on('message_create', async (msg) => {
             await supabase.from('contactos').upsert({ 
                 telefono: telefono, 
                 clasificacion: mensajeTexto.toLowerCase(),
-                nombre: nombreMetadata 
+                nombre: nombreDetectado 
             }, { onConflict: 'telefono' });
+            console.log(`⭐ Clasificado: ${nombreDetectado} como ${mensajeTexto}`);
             return;
         }
 
-        // 2. AUTO-REGISTRO (Si no existe, se crea)
+        // 2. AUTO-REGISTRO (Solo si no existe en la tabla)
         const { data: existe } = await supabase.from('contactos').select('telefono').eq('telefono', telefono).single();
 
         if (!existe) {
             await supabase.from('contactos').insert([{ 
                 telefono: telefono, 
-                nombre: nombreMetadata, 
+                nombre: nombreDetectado, 
                 clasificacion: '!cliente nuevo' 
             }]);
-            console.log(`🆕 Registrado automáticamente: ${nombreMetadata}`);
+            console.log(`🆕 Auto-registro exitoso: ${nombreDetectado}`);
         }
 
-        // 3. GUARDADO DE HISTORIAL (Obligatorio)
+        // 3. HISTORIAL DE MENSAJES (Siempre se ejecuta)
         await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefono, 
             mensaje_texto: mensajeTexto, 
@@ -82,7 +93,7 @@ client.on('message_create', async (msg) => {
         }]);
 
     } catch (error) {
-        console.error("❌ Error de registro:", error.message);
+        console.error("❌ Error en flujo:", error.message);
     }
 });
 

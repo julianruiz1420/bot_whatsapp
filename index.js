@@ -17,32 +17,30 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 2. SERVIDOR EXPRESS Y RUTAS DE CONTROL
+// 2. SERVIDOR EXPRESS (Health Check y Control de Sesión)
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.status(200).send('<h1>Bot de WhatsApp Activo</h1><p>Escuchando entradas y salidas.</p>');
+    res.status(200).send('<h1>Bot CRM Activo</h1><p>Escuchando entradas, salidas y comandos de clasificación.</p>');
 });
 
-// RUTA PARA CAMBIAR DE CUENTA (Borra la sesión actual)
+// Ruta para cerrar sesión y cambiar de cuenta
 app.get('/logout', async (req, res) => {
     try {
         console.log('🔄 Solicitud de cierre de sesión recibida...');
-        await client.logout(); // Cierra la sesión en WhatsApp y limpia LocalAuth
-        res.send('<h1>Sesión Cerrada</h1><p>El bot se está reiniciando. Revisa los logs de Railway para el nuevo QR.</p>');
-        console.log('✅ Sesión cerrada correctamente. Reiniciando para generar nuevo QR...');
-        // El bot suele requerir un reinicio tras el logout para regenerar el QR limpiamente
+        await client.logout();
+        res.send('<h1>Sesión Cerrada</h1><p>El bot se está reiniciando para generar un nuevo QR.</p>');
         process.exit(0); 
     } catch (error) {
         console.error('❌ Error al cerrar sesión:', error.message);
-        res.status(500).send('Error al cerrar sesión: ' + error.message);
+        res.status(500).send('Error: ' + error.message);
     }
 });
 
 app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo. Acceso a /logout disponible.`));
 
-// 3. INICIALIZACIÓN CON LOCALAUTH (Persistencia en Volumen de 5GB)
+// 3. INICIALIZACIÓN CON LOCALAUTH (Usa Volumen de Railway)
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
@@ -58,7 +56,7 @@ const client = new Client({
     }
 });
 
-// 4. MANEJO DEL QR (Genera Link en Supabase Storage)
+// 4. MANEJO DEL QR (Almacenamiento en Supabase)
 client.on('qr', async (qr) => {
     try {
         const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
@@ -68,7 +66,7 @@ client.on('qr', async (qr) => {
         });
         const { data } = supabase.storage.from(SUPABASE_BUCKET_NAME).getPublicUrl(fileName);
         console.log('\n----------------------------------------------------');
-        console.log(`➡️ ESCANEA AQUÍ PARA NUEVA CUENTA: ${data.publicUrl}`);
+        console.log(`➡️ ESCANEA AQUÍ PARA VINCULAR: ${data.publicUrl}`);
         console.log('----------------------------------------------------\n');
     } catch (e) {
         console.error('❌ Error QR:', e.message);
@@ -77,34 +75,64 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => console.log('✅ BOT CONECTADO. Sesión protegida en el Volumen.'));
 
-// 5. LÓGICA DE MENSAJES: CAPTURA ENTRADAS Y SALIDAS
+// 5. LÓGICA DE MENSAJES Y CLASIFICACIÓN
 client.on('message_create', async (msg) => {
+    // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
     const direccion = esSalida ? 'salida' : 'entrada';
     const chatId = esSalida ? msg.to : msg.from;
     const telefonoCliente = chatId.replace('@c.us', '');
-    const mensajeTexto = msg.body || `[Mensaje tipo: ${msg.type}]`;
+    const mensajeTexto = msg.body ? msg.body.trim() : `[Tipo: ${msg.type}]`;
 
     try {
-        const { error } = await supabase.from('mensajes_whatsapp').insert([{ 
+        // --- A. GESTIÓN DE COMANDOS DE CLASIFICACIÓN (Solo Salidas Manuales) ---
+        const comandosValidos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
+        
+        if (esSalida && comandosValidos.includes(mensajeTexto.toLowerCase())) {
+            const { error: errorUpsert } = await supabase
+                .from('contactos')
+                .upsert({ 
+                    telefono: telefonoCliente, 
+                    clasificacion: mensajeTexto.toLowerCase(),
+                    nombre: msg._data.notifyName || 'Contacto Identificado'
+                }, { onConflict: 'telefono' });
+
+            if (!errorUpsert) {
+                console.log(`⭐ Clasificación actualizada: ${telefonoCliente} -> ${mensajeTexto}`);
+                await client.sendMessage(msg.to, `*Sistema CRM:* Contacto clasificado como ${mensajeTexto.toUpperCase()}`);
+            }
+            return; // No guardamos el comando en el historial de mensajes
+        }
+
+        // --- B. AUTO-REGISTRO DE CONTACTOS NUEVOS ---
+        let { data: contacto } = await supabase
+            .from('contactos')
+            .select('clasificacion')
+            .eq('telefono', telefonoCliente)
+            .single();
+
+        if (!contacto) {
+            await supabase.from('contactos').insert([{ 
+                telefono: telefonoCliente, 
+                nombre: msg._data.notifyName || 'Nuevo Registro', 
+                clasificacion: '!cliente nuevo' 
+            }]);
+            console.log(`🆕 Auto-registro: ${telefonoCliente} como !cliente nuevo`);
+        }
+
+        // --- C. GUARDADO EN HISTORIAL DE MENSAJES ---
+        const { error: errorMsg } = await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefonoCliente, 
             mensaje_texto: mensajeTexto, 
             direccion: direccion 
         }]);
         
-        if (error) {
-            console.error(`❌ Error en ${direccion}:`, error.message);
-        } else {
-            console.log(`✅ Registro guardado: ${direccion} (${telefonoCliente})`);
-        }
+        if (errorMsg) console.error(`❌ Error Supabase:`, errorMsg.message);
 
-        if (!esSalida && msg.body.toLowerCase().includes('hola')) {
-            await msg.reply('¡Hola! Soy tu asistente virtual. He guardado tu mensaje.');
-        }
     } catch (error) {
-        console.error("❌ Error fatal:", error.message);
+        console.error("❌ Error en procesamiento:", error.message);
     }
 });
 

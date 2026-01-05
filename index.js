@@ -5,42 +5,22 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 
-// 1. CONFIGURACIÓN DE VARIABLES
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const SUPABASE_BUCKET_NAME = 'qr-sessions'; 
-
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-    console.error('\n❌ ERROR: Faltan variables de Supabase.');
-    process.exit(1);
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// 2. SERVIDOR EXPRESS (Health Check y Control de Sesión)
+// 1. CONFIGURACIÓN
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.status(200).send('<h1>Bot CRM Activo</h1><p>Capturando nombres reales de contactos.</p>');
-});
-
-// Ruta para cerrar sesión y cambiar de cuenta
+// RUTAS DE CONTROL
+app.get('/', (req, res) => res.send('Bot CRM Activo y Corregido'));
 app.get('/logout', async (req, res) => {
     try {
-        console.log('🔄 Solicitud de cierre de sesión recibida...');
         await client.logout();
-        res.send('<h1>Sesión Cerrada</h1><p>El bot se está reiniciando para generar un nuevo QR.</p>');
         process.exit(0); 
-    } catch (error) {
-        console.error('❌ Error al cerrar sesión:', error.message);
-        res.status(500).send('Error: ' + error.message);
-    }
+    } catch (e) { res.status(500).send(e.message); }
 });
+app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo.`));
 
-app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo. Acceso a /logout disponible.`));
-
-// 3. INICIALIZACIÓN CON LOCALAUTH (Usa Volumen de Railway)
+// 2. INICIALIZACIÓN (Versión remota estable)
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
@@ -56,88 +36,75 @@ const client = new Client({
     }
 });
 
-// 4. MANEJO DEL QR (Almacenamiento en Supabase)
+// 3. QR Y LISTO
 client.on('qr', async (qr) => {
-    try {
-        const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
-        const fileName = `temp-qr/session-${Date.now()}.png`;
-        await supabase.storage.from(SUPABASE_BUCKET_NAME).upload(fileName, qrBuffer, {
-            contentType: 'image/png', upsert: true
-        });
-        const { data } = supabase.storage.from(SUPABASE_BUCKET_NAME).getPublicUrl(fileName);
-        console.log('\n----------------------------------------------------');
-        console.log(`➡️ ESCANEA AQUÍ PARA VINCULAR: ${data.publicUrl}`);
-        console.log('----------------------------------------------------\n');
-    } catch (e) {
-        console.error('❌ Error QR:', e.message);
-    }
+    const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
+    const fileName = `temp-qr/session-${Date.now()}.png`;
+    await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { contentType: 'image/png', upsert: true });
+    const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
+    console.log(`➡️ QR: ${data.publicUrl}`);
 });
 
-client.on('ready', () => console.log('✅ BOT CONECTADO. Sesión protegida en el Volumen.'));
+client.on('ready', () => console.log('✅ BOT CONECTADO.'));
 
-// 5. LÓGICA DE MENSAJES, CLASIFICACIÓN Y NOMBRES REALES
+// 4. LÓGICA DE MENSAJES CON SOLUCIÓN AL ERROR DE NOMBRES
 client.on('message_create', async (msg) => {
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
-    const direccion = esSalida ? 'salida' : 'entrada';
     const chatId = esSalida ? msg.to : msg.from;
     const telefonoCliente = chatId.replace('@c.us', '');
-    const mensajeTexto = msg.body ? msg.body.trim() : `[Tipo: ${msg.type}]`;
+    const mensajeTexto = msg.body ? msg.body.trim() : '';
 
     try {
-        // --- A. OBTENER NOMBRE REAL DE LA AGENDA ---
-        const contactoInfo = await msg.getContact();
-        const nombreParaDB = contactoInfo.name || contactoInfo.pushname || 'Sin Nombre';
-
-        // --- B. GESTIÓN DE COMANDOS DE CLASIFICACIÓN (Solo Salidas Manuales) ---
-        const comandosValidos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
+        // --- SOLUCIÓN AL ERROR: Intento de obtener contacto con respaldo ---
+        let nombreFinal = msg._data.notifyName || 'Contacto Nuevo';
         
-        if (esSalida && comandosValidos.includes(mensajeTexto.toLowerCase())) {
-            const { error: errorUpsert } = await supabase
-                .from('contactos')
-                .upsert({ 
-                    telefono: telefonoCliente, 
-                    clasificacion: mensajeTexto.toLowerCase(),
-                    nombre: nombreParaDB
-                }, { onConflict: 'telefono' });
-
-            if (!errorUpsert) {
-                console.log(`⭐ Clasificación: ${nombreParaDB} -> ${mensajeTexto}`);
-                await client.sendMessage(msg.to, `*Sistema CRM:* ${nombreParaDB} clasificado como ${mensajeTexto.toUpperCase()}`);
+        try {
+            // Intentamos obtener el contacto, si falla por el error de WhatsApp, usamos el nombre de perfil
+            const contacto = await msg.getContact();
+            if (contacto.name || contacto.pushname) {
+                nombreFinal = contacto.name || contacto.pushname;
             }
+        } catch (e) {
+            console.log(`⚠️ Error getContact (esperado): Usando nombre de perfil para ${telefonoCliente}`);
+        }
+
+        // A. COMANDOS DE CLASIFICACIÓN
+        const comandosValidos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
+        if (esSalida && comandosValidos.includes(mensajeTexto.toLowerCase())) {
+            await supabase.from('contactos').upsert({ 
+                telefono: telefonoCliente, 
+                clasificacion: mensajeTexto.toLowerCase(),
+                nombre: nombreFinal 
+            }, { onConflict: 'telefono' });
+            
+            await client.sendMessage(msg.to, `✅ Clasificado como ${mensajeTexto.toUpperCase()}`);
             return;
         }
 
-        // --- C. AUTO-REGISTRO DE CONTACTOS NUEVOS ---
-        let { data: contacto } = await supabase
-            .from('contactos')
-            .select('telefono')
-            .eq('telefono', telefonoCliente)
-            .single();
+        // B. AUTO-REGISTRO AUTOMÁTICO (Si no está, es !cliente nuevo)
+        let { data: existe } = await supabase.from('contactos').select('telefono').eq('telefono', telefonoCliente).single();
 
-        if (!contacto) {
+        if (!existe) {
             await supabase.from('contactos').insert([{ 
                 telefono: telefonoCliente, 
-                nombre: nombreParaDB,
+                nombre: nombreFinal, 
                 clasificacion: '!cliente nuevo' 
             }]);
-            console.log(`🆕 Auto-registro: ${nombreParaDB} (${telefonoCliente})`);
+            console.log(`🆕 Auto-registro: ${nombreFinal}`);
         }
 
-        // --- D. GUARDADO EN HISTORIAL DE MENSAJES ---
-        const { error: errorMsg } = await supabase.from('mensajes_whatsapp').insert([{ 
+        // C. HISTORIAL
+        await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefonoCliente, 
             mensaje_texto: mensajeTexto, 
-            direccion: direccion 
+            direccion: esSalida ? 'salida' : 'entrada' 
         }]);
-        
-        if (errorMsg) console.error(`❌ Error Supabase:`, errorMsg.message);
 
     } catch (error) {
-        console.error("❌ Error en procesamiento:", error.message);
+        console.error("❌ Error General:", error.message);
     }
 });
 
-console.log('🚀 Inicializando cliente...');
 client.initialize();

@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const qrcodeLib = require('qrcode');
-const { Client, LocalAuth } = require('whatsapp-web.js'); // Cambiado a LocalAuth para usar Volumen
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 
@@ -17,17 +17,17 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 2. HEALTH CHECK (Para que Railway no apague el bot)
+// 2. HEALTH CHECK (Mantiene el bot vivo en Railway)
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.status(200).send('Bot de WhatsApp Activo y Guardando Datos'));
-app.listen(port, '0.0.0.0', () => console.log(`[HEALTH CHECK] Port ${port}`));
+app.get('/', (req, res) => res.status(200).send('Bot Online - Capturando Entradas y Salidas'));
+app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo`));
 
-// 3. INICIALIZACIÓN DEL CLIENTE CON VOLUMEN PERSISTENTE
+// 3. INICIALIZACIÓN CON LOCALAUTH (Usa tu Volumen de 5GB)
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'session',
-        dataPath: path.join(__dirname, '.wwebjs_auth') // Apunta a tu Volumen de Railway
+        dataPath: path.join(__dirname, '.wwebjs_auth') 
     }),
     webVersionCache: {
         type: 'remote',
@@ -35,75 +35,64 @@ const client = new Client({
     },
     puppeteer: {
         headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--no-zygote'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-zygote']
     }
 });
 
-// 4. MANEJO DEL QR (Genera Link de Supabase)
+// 4. MANEJO DEL QR (Genera Link en Supabase Storage)
 client.on('qr', async (qr) => {
-    console.log('📱 NUEVO QR GENERADO...');
     try {
         const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
         const fileName = `temp-qr/session-${Date.now()}.png`;
-        
         await supabase.storage.from(SUPABASE_BUCKET_NAME).upload(fileName, qrBuffer, {
-            contentType: 'image/png',
-            upsert: true
+            contentType: 'image/png', upsert: true
         });
-        
         const { data } = supabase.storage.from(SUPABASE_BUCKET_NAME).getPublicUrl(fileName);
         console.log('\n----------------------------------------------------');
         console.log(`➡️ ESCANEA AQUÍ: ${data.publicUrl}`);
         console.log('----------------------------------------------------\n');
     } catch (e) {
-        console.error('❌ Error Supabase QR:', e.message);
+        console.error('❌ Error QR:', e.message);
     }
 });
 
-client.on('ready', () => {
-    console.log('✅ BOT LISTO Y CONECTADO.');
-    console.log('📂 Sesión guardada en el Volumen Persistente de Railway.');
-});
+client.on('ready', () => console.log('✅ BOT CONECTADO. Sesión protegida en el Volumen.'));
 
-// 5. LÓGICA DE GUARDADO DE MENSAJES (Tu lógica original)
-client.on('message', async (msg) => {
+// 5. LÓGICA DE MENSAJES: CAPTURA ENTRADAS Y SALIDAS
+client.on('message_create', async (msg) => {
     // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
-    const telefonoCliente = msg.from.replace('@c.us', '');
+    // Detectar si el mensaje lo envié yo (desde el celular o el bot) o el cliente
+    const esSalida = msg.fromMe; 
+    const direccion = esSalida ? 'salida' : 'entrada';
+    
+    // Si es salida, el 'to' es el cliente. Si es entrada, el 'from' es el cliente.
+    const chatId = esSalida ? msg.to : msg.from;
+    const telefonoCliente = chatId.replace('@c.us', '');
     const mensajeTexto = msg.body || `[Mensaje tipo: ${msg.type}]`;
 
     try {
-        // Guardar mensaje de entrada
-        const { error: errorEntrada } = await supabase.from('mensajes_whatsapp').insert([{ 
+        // Guardar en la tabla mensajes_whatsapp
+        const { error } = await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefonoCliente, 
             mensaje_texto: mensajeTexto, 
-            direccion: 'entrada' 
+            direccion: direccion 
         }]);
         
-        if (errorEntrada) console.error("❌ Error Supabase (Entrada):", errorEntrada.message);
-
-        // Lógica de respuesta automática
-        if (msg.body.toLowerCase().includes('hola')) {
-            const respuesta = '¡Hola! Soy tu asistente virtual. He guardado tu mensaje.';
-            await msg.reply(respuesta);
-
-            // Guardar mensaje de salida
-            const { error: errorSalida } = await supabase.from('mensajes_whatsapp').insert([{ 
-                telefono_origen: telefonoCliente, 
-                mensaje_texto: respuesta, 
-                direccion: 'salida' 
-            }]);
-            
-            if (errorSalida) console.error("❌ Error Supabase (Salida):", errorSalida.message);
+        if (error) {
+            console.error(`❌ Error en ${direccion}:`, error.message);
+        } else {
+            console.log(`✅ Registro guardado: ${direccion} (${telefonoCliente})`);
         }
+
+        // Respuesta automática (Solo si es entrada y contiene 'hola')
+        if (!esSalida && msg.body.toLowerCase().includes('hola')) {
+            await msg.reply('¡Hola! Soy tu asistente virtual. He guardado tu mensaje.');
+        }
+
     } catch (error) {
-        console.error("❌ Error fatal en proceso de guardado:", error.message);
+        console.error("❌ Error fatal:", error.message);
     }
 });
 

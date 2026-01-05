@@ -62,7 +62,7 @@ client.on('message_create', async (msg) => {
         }
 
         // 1. COMANDOS DE CLASIFICACIÓN
-        const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
+        const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo', '!grupo de gestion', '!operador'];
         if (esSalida && comandos.includes(mensajeTexto.toLowerCase())) {
             await supabase.from('contactos').upsert({ 
                 telefono: telefono, 

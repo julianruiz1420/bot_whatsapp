@@ -22,7 +22,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.status(200).send('<h1>Bot CRM Activo</h1><p>Escuchando entradas, salidas y comandos de clasificación.</p>');
+    res.status(200).send('<h1>Bot CRM Activo</h1><p>Capturando nombres reales de contactos.</p>');
 });
 
 // Ruta para cerrar sesión y cambiar de cuenta
@@ -75,9 +75,8 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => console.log('✅ BOT CONECTADO. Sesión protegida en el Volumen.'));
 
-// 5. LÓGICA DE MENSAJES Y CLASIFICACIÓN
+// 5. LÓGICA DE MENSAJES, CLASIFICACIÓN Y NOMBRES REALES
 client.on('message_create', async (msg) => {
-    // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
@@ -87,7 +86,11 @@ client.on('message_create', async (msg) => {
     const mensajeTexto = msg.body ? msg.body.trim() : `[Tipo: ${msg.type}]`;
 
     try {
-        // --- A. GESTIÓN DE COMANDOS DE CLASIFICACIÓN (Solo Salidas Manuales) ---
+        // --- A. OBTENER NOMBRE REAL DE LA AGENDA ---
+        const contactoInfo = await msg.getContact();
+        const nombreParaDB = contactoInfo.name || contactoInfo.pushname || 'Sin Nombre';
+
+        // --- B. GESTIÓN DE COMANDOS DE CLASIFICACIÓN (Solo Salidas Manuales) ---
         const comandosValidos = ['!cliente recurrente', '!proveedor', '!cliente nuevo'];
         
         if (esSalida && comandosValidos.includes(mensajeTexto.toLowerCase())) {
@@ -96,33 +99,33 @@ client.on('message_create', async (msg) => {
                 .upsert({ 
                     telefono: telefonoCliente, 
                     clasificacion: mensajeTexto.toLowerCase(),
-                    nombre: msg._data.notifyName || 'Contacto Identificado'
+                    nombre: nombreParaDB
                 }, { onConflict: 'telefono' });
 
             if (!errorUpsert) {
-                console.log(`⭐ Clasificación actualizada: ${telefonoCliente} -> ${mensajeTexto}`);
-                await client.sendMessage(msg.to, `*Sistema CRM:* Contacto clasificado como ${mensajeTexto.toUpperCase()}`);
+                console.log(`⭐ Clasificación: ${nombreParaDB} -> ${mensajeTexto}`);
+                await client.sendMessage(msg.to, `*Sistema CRM:* ${nombreParaDB} clasificado como ${mensajeTexto.toUpperCase()}`);
             }
-            return; // No guardamos el comando en el historial de mensajes
+            return;
         }
 
-        // --- B. AUTO-REGISTRO DE CONTACTOS NUEVOS ---
+        // --- C. AUTO-REGISTRO DE CONTACTOS NUEVOS ---
         let { data: contacto } = await supabase
             .from('contactos')
-            .select('clasificacion')
+            .select('telefono')
             .eq('telefono', telefonoCliente)
             .single();
 
         if (!contacto) {
             await supabase.from('contactos').insert([{ 
                 telefono: telefonoCliente, 
-                nombre: msg._data.notifyName || 'Nuevo Registro', 
+                nombre: nombreParaDB,
                 clasificacion: '!cliente nuevo' 
             }]);
-            console.log(`🆕 Auto-registro: ${telefonoCliente} como !cliente nuevo`);
+            console.log(`🆕 Auto-registro: ${nombreParaDB} (${telefonoCliente})`);
         }
 
-        // --- C. GUARDADO EN HISTORIAL DE MENSAJES ---
+        // --- D. GUARDADO EN HISTORIAL DE MENSAJES ---
         const { error: errorMsg } = await supabase.from('mensajes_whatsapp').insert([{ 
             telefono_origen: telefonoCliente, 
             mensaje_texto: mensajeTexto, 

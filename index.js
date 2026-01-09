@@ -10,8 +10,21 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Health Check para Railway
-app.get('/', (req, res) => res.send('Bot CRM - Optimización y Clasificación Activa'));
+// Health Check y rutas del servidor
+app.get('/', (req, res) => res.send('Bot CRM - Activo y Operando'));
+
+// RUTA PARA CERRAR SESIÓN MANUALMENTE
+app.get('/logout', async (req, res) => {
+    try {
+        await client.logout();
+        console.log('⚠️ Sesión cerrada por petición del usuario.');
+        res.send('Sesión cerrada correctamente. Revisa los Logs de Railway para el nuevo QR.');
+    } catch (error) {
+        console.error('❌ Error al cerrar sesión:', error.message);
+        res.status(500).send('Error al intentar cerrar la sesión: ' + error.message);
+    }
+});
+
 app.listen(port, '0.0.0.0', () => console.log(`[SERVER] Puerto ${port} listo.`));
 
 // 2. INICIALIZACIÓN DEL CLIENTE
@@ -30,12 +43,17 @@ const client = new Client({
     }
 });
 
-// 3. GESTIÓN DE QR
+// 3. GESTIÓN DE QR (Generación y subida a Supabase)
 client.on('qr', async (qr) => {
     try {
         const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
         const fileName = `temp-qr/session-${Date.now()}.png`;
-        await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { contentType: 'image/png', upsert: true });
+        
+        await supabase.storage.from('qr-sessions').upload(fileName, qrBuffer, { 
+            contentType: 'image/png', 
+            upsert: true 
+        });
+
         const { data } = supabase.storage.from('qr-sessions').getPublicUrl(fileName);
         console.log(`➡️ QR LINK: ${data.publicUrl}`);
     } catch (e) {
@@ -45,12 +63,11 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => console.log('✅ BOT CONECTADO.'));
 
-// --- 4. CONFIGURACIÓN DE OPTIMIZACIÓN (FILTRO DE CHATS) ---
-// Solo se guardará el historial de mensajes para estas categorías:
+// 4. LÓGICA DE MENSAJERÍA Y CRM
 const CLASIFICACIONES_PERMITIDAS = ['!cliente nuevo', '!cliente recurrente'];
 
 client.on('message_create', async (msg) => {
-    // Ignorar grupos y difusiones para no saturar la base de datos
+    // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
@@ -59,18 +76,16 @@ client.on('message_create', async (msg) => {
     const mensajeTexto = msg.body ? msg.body.trim() : '';
 
     try {
-        // --- A. OBTENER NOMBRE (PRIORIDAD AGENDA -> PERFIL) ---
+        // A. Obtener Nombre
         let nombreDetectado = msg._data.notifyName || 'Contacto Nuevo';
         try {
             const chat = await msg.getChat();
             if (chat.name && chat.name !== telefono) {
                 nombreDetectado = chat.name;
             }
-        } catch (e) {
-            // Si getChat falla por el error de evaluación, mantenemos el nombre de perfil
-        }
+        } catch (e) {}
 
-        // --- B. VERIFICAR CLASIFICACIÓN EXISTENTE ---
+        // B. Verificar Clasificación en BD
         let { data: contacto } = await supabase
             .from('contactos')
             .select('nombre, clasificacion')
@@ -79,7 +94,7 @@ client.on('message_create', async (msg) => {
 
         let clasificacionActual = contacto ? contacto.clasificacion : '!cliente nuevo';
 
-        // --- C. COMANDOS DE CLASIFICACIÓN (TODOS DISPONIBLES) ---
+        // C. Comandos de Clasificación
         const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo', '!grupo de gestion', '!operador'];
         
         if (esSalida && comandos.includes(mensajeTexto.toLowerCase())) {
@@ -91,10 +106,10 @@ client.on('message_create', async (msg) => {
             }, { onConflict: 'telefono' });
             
             console.log(`⭐ Clasificación actualizada: ${nombreDetectado} -> ${nuevaClasificacion}`);
-            return; // No guardamos el comando en el historial
+            return; 
         }
 
-        // --- D. AUTO-REGISTRO DE NUEVOS CONTACTOS ---
+        // D. Auto-registro de nuevos
         if (!contacto) {
             await supabase.from('contactos').insert([{ 
                 telefono, 
@@ -104,17 +119,13 @@ client.on('message_create', async (msg) => {
             console.log(`🆕 Auto-registro: ${nombreDetectado}`);
         }
 
-        // --- E. CONTROL DE ALMACENAMIENTO (RESTRICCIÓN CRM) ---
-        // Solo guardamos si es cliente. Proveedores, Operadores y Grupos de Gestión no ocupan espacio.
+        // E. Almacenamiento Selectivo (Historial)
         if (CLASIFICACIONES_PERMITIDAS.includes(clasificacionActual)) {
             await supabase.from('mensajes_whatsapp').insert([{ 
                 telefono_origen: telefono, 
                 mensaje_texto: mensajeTexto, 
                 direccion: esSalida ? 'salida' : 'entrada' 
             }]);
-        } else {
-            // Opcional: Log para confirmar que el ahorro de espacio funciona
-            // console.log(`🧹 Mensaje omitido para: ${clasificacionActual}`);
         }
 
     } catch (error) {
@@ -122,4 +133,5 @@ client.on('message_create', async (msg) => {
     }
 });
 
+// Inicializar el bot
 client.initialize();

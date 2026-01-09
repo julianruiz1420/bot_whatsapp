@@ -10,15 +10,23 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Health Check y rutas del servidor
+// Health Check y página principal
 app.get('/', (req, res) => res.send('Bot CRM - Activo y Operando'));
 
 // RUTA PARA CERRAR SESIÓN MANUALMENTE
+// Al entrar a https://tu-url.up.railway.app/logout se limpiará la sesión
 app.get('/logout', async (req, res) => {
     try {
+        console.log('⚠️ Petición de cierre de sesión recibida...');
         await client.logout();
-        console.log('⚠️ Sesión cerrada por petición del usuario.');
-        res.send('Sesión cerrada correctamente. Revisa los Logs de Railway para el nuevo QR.');
+        await client.destroy();
+        console.log('✅ Sesión destruida.');
+        res.send('Sesión cerrada correctamente. El bot se reiniciará. Revisa los Logs para el nuevo QR.');
+        
+        // Forzamos el reinicio del contenedor para limpiar el volumen persistente
+        setTimeout(() => {
+            process.exit(0);
+        }, 3000);
     } catch (error) {
         console.error('❌ Error al cerrar sesión:', error.message);
         res.status(500).send('Error al intentar cerrar la sesión: ' + error.message);
@@ -39,7 +47,12 @@ const client = new Client({
     },
     puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-zygote']
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-dev-shm-usage', 
+            '--no-zygote'
+        ]
     }
 });
 

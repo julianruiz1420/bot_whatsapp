@@ -10,23 +10,53 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Health Check y página principal
-app.get('/', (req, res) => res.send('Bot CRM - Activo y Operando'));
+// INTERFAZ WEB CON BOTÓN (Panel de Control)
+app.get('/', (req, res) => {
+    res.send(`
+        <html>
+            <head>
+                <title>Panel Control Bot</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f4f4f9;">
+                <div style="background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: inline-block;">
+                    <h1 style="color: #25d366;">WhatsApp CRM Bot</h1>
+                    <p>Estado del Servidor: <span style="color: green; font-weight: bold;">ONLINE</span></p>
+                    <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+                    
+                    <button onclick="confirmarCierre()" 
+                        style="background: #e74c3c; color: white; padding: 15px 30px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold;">
+                        LOGOUT (Cerrar Sesión)
+                    </button>
+                    
+                    <p style="margin-top: 20px; color: #666; font-size: 14px;">
+                        Nota: Al cerrar sesión, deberás revisar los Logs de Railway <br> para obtener el nuevo enlace del código QR.
+                    </p>
+                </div>
+
+                <script>
+                    function confirmarCierre() {
+                        if (confirm('¿Estás seguro de que quieres cerrar la sesión del Bot?')) {
+                            location.href = '/logout';
+                        }
+                    }
+                </script>
+            </body>
+        </html>
+    `);
+});
 
 // RUTA PARA CERRAR SESIÓN MANUALMENTE
-// Al entrar a https://tu-url.up.railway.app/logout se limpiará la sesión
 app.get('/logout', async (req, res) => {
     try {
-        console.log('⚠️ Petición de cierre de sesión recibida...');
+        console.log('⚠️ Petición de cierre de sesión recibida via Web/Comando...');
         await client.logout();
         await client.destroy();
         console.log('✅ Sesión destruida.');
-        res.send('Sesión cerrada correctamente. El bot se reiniciará. Revisa los Logs para el nuevo QR.');
+        res.send('<h1>Sesión Cerrada</h1><p>El bot se está reiniciando. Por favor, revisa los Logs en Railway para ver el nuevo código QR.</p>');
         
-        // Forzamos el reinicio del contenedor para limpiar el volumen persistente
-        setTimeout(() => {
-            process.exit(0);
-        }, 3000);
+        // Reinicio forzado para limpiar el volumen de Railway
+        setTimeout(() => { process.exit(0); }, 3000);
     } catch (error) {
         console.error('❌ Error al cerrar sesión:', error.message);
         res.status(500).send('Error al intentar cerrar la sesión: ' + error.message);
@@ -47,16 +77,11 @@ const client = new Client({
     },
     puppeteer: {
         headless: true,
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', 
-            '--no-zygote'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-zygote']
     }
 });
 
-// 3. GESTIÓN DE QR (Generación y subida a Supabase)
+// 3. GESTIÓN DE QR
 client.on('qr', async (qr) => {
     try {
         const qrBuffer = await qrcodeLib.toBuffer(qr, { type: 'png' });
@@ -80,7 +105,6 @@ client.on('ready', () => console.log('✅ BOT CONECTADO.'));
 const CLASIFICACIONES_PERMITIDAS = ['!cliente nuevo', '!cliente recurrente'];
 
 client.on('message_create', async (msg) => {
-    // Ignorar grupos y difusiones
     if (msg.from.includes('@g.us') || msg.from.includes('broadcast')) return;
 
     const esSalida = msg.fromMe; 
@@ -88,8 +112,16 @@ client.on('message_create', async (msg) => {
     const telefono = chatId.replace('@c.us', '');
     const mensajeTexto = msg.body ? msg.body.trim() : '';
 
+    // COMANDO SECRETO DE CIERRE (Solo desde tu cuenta)
+    if (esSalida && mensajeTexto.toLowerCase() === '!cerrar') {
+        await msg.reply('⚠️ Cerrando sesión y reiniciando sistema...');
+        await client.logout();
+        await client.destroy();
+        setTimeout(() => { process.exit(0); }, 2000);
+        return;
+    }
+
     try {
-        // A. Obtener Nombre
         let nombreDetectado = msg._data.notifyName || 'Contacto Nuevo';
         try {
             const chat = await msg.getChat();
@@ -98,7 +130,6 @@ client.on('message_create', async (msg) => {
             }
         } catch (e) {}
 
-        // B. Verificar Clasificación en BD
         let { data: contacto } = await supabase
             .from('contactos')
             .select('nombre, clasificacion')
@@ -107,7 +138,6 @@ client.on('message_create', async (msg) => {
 
         let clasificacionActual = contacto ? contacto.clasificacion : '!cliente nuevo';
 
-        // C. Comandos de Clasificación
         const comandos = ['!cliente recurrente', '!proveedor', '!cliente nuevo', '!grupo de gestion', '!operador'];
         
         if (esSalida && comandos.includes(mensajeTexto.toLowerCase())) {
@@ -117,22 +147,17 @@ client.on('message_create', async (msg) => {
                 clasificacion: nuevaClasificacion, 
                 nombre: nombreDetectado 
             }, { onConflict: 'telefono' });
-            
-            console.log(`⭐ Clasificación actualizada: ${nombreDetectado} -> ${nuevaClasificacion}`);
             return; 
         }
 
-        // D. Auto-registro de nuevos
         if (!contacto) {
             await supabase.from('contactos').insert([{ 
                 telefono, 
                 nombre: nombreDetectado, 
                 clasificacion: '!cliente nuevo' 
             }]);
-            console.log(`🆕 Auto-registro: ${nombreDetectado}`);
         }
 
-        // E. Almacenamiento Selectivo (Historial)
         if (CLASIFICACIONES_PERMITIDAS.includes(clasificacionActual)) {
             await supabase.from('mensajes_whatsapp').insert([{ 
                 telefono_origen: telefono, 
@@ -140,11 +165,9 @@ client.on('message_create', async (msg) => {
                 direccion: esSalida ? 'salida' : 'entrada' 
             }]);
         }
-
     } catch (error) {
         console.error("❌ Error en flujo:", error.message);
     }
 });
 
-// Inicializar el bot
 client.initialize();
